@@ -1,0 +1,88 @@
+import requests
+import pandas as pd
+import datetime
+import os
+
+# ================== TELEGRAM CONFIG ==================
+BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+CHAT_ID = os.getenv("TG_CHAT_ID")
+
+def send_telegram(message):
+    if not BOT_TOKEN or not CHAT_ID:
+        print("Telegram secrets not set")
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
+    requests.post(url, data=payload)
+
+# ================== TIME CHECK ==================
+now = datetime.datetime.now()
+weekday = now.weekday()  # 0=Mon, 6=Sun
+
+if weekday > 4:
+    send_telegram("📴 NO TRADE DAY (Weekend)")
+    exit()
+
+# ================== NSE PRE-OPEN DATA ==================
+def fetch_preopen():
+    url = "https://www.nseindia.com/api/market-data-pre-open?key=NIFTY"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/json"
+    }
+    session = requests.Session()
+    session.get("https://www.nseindia.com", headers=headers)
+    response = session.get(url, headers=headers, timeout=10)
+    data = response.json()["data"]
+    rows = []
+
+    for d in data:
+        meta = d.get("metadata", {})
+        if meta.get("symbol"):
+            rows.append({
+                "symbol": meta["symbol"],
+                "change": meta.get("pChange", 0),
+                "open": meta.get("openPrice", 0),
+                "high": meta.get("highPrice", 0),
+                "low": meta.get("lowPrice", 0),
+                "close": meta.get("previousClose", 0)
+            })
+    return pd.DataFrame(rows)
+
+try:
+    df = fetch_preopen()
+except Exception as e:
+    send_telegram(f"⚠️ NSE Pre-open fetch failed\n{e}")
+    exit()
+
+# ================== FILTER TOP MOVERS ==================
+df = df.sort_values("change", ascending=False)
+top5 = df.head(5)
+
+if top5.empty:
+    send_telegram("⚠️ No strong pre-open movers today.\nNO TRADE")
+    exit()
+
+# ================== BUILD MESSAGE ==================
+msg = "📊 NSE PRE-OPEN TOP 5 (Intraday Watchlist)\n\n"
+
+for _, r in top5.iterrows():
+    entry = round(r["high"] * 1.002, 2)
+    sl = round(r["low"] * 0.998, 2)
+    target = round(entry + (entry - sl) * 2, 2)
+
+    msg += (
+        f"🔹 {r['symbol']}\n"
+        f"Entry > {entry} (15m sustain above PDH)\n"
+        f"SL: {sl}\n"
+        f"Target: {target}\n\n"
+    )
+
+msg += "⚠️ Trade ONLY if 15-min candle sustains above entry.\n"
+msg += "❌ If no sustain → NO TRADE.\n"
+msg += "📱 Execute manually on Groww."
+
+# ================== SEND ALERT ==================
+send_telegram(msg)
+print("Alert sent successfully")
